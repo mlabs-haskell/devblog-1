@@ -6,3 +6,4 @@
 
 ## What can I do with this?
 
+Please see the LICENSE.md file.
