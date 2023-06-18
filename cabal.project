@@ -1,0 +1,10 @@
+packages: ./coarbitrary-function.cabal
+
+tests: true
+
+documentation: true
+
+test-show-details: direct
+
+package coarbitrary-function
+  ghc-options: -Werror

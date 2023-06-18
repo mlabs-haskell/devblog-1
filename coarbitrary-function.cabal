@@ -1,0 +1,63 @@
+cabal-version:      3.0
+name:               coarbitrary-function
+version:            1.0.0
+synopsis:           TODO
+description:        TODO
+homepage:           https://github.com/mlabs-haskell/coarbitrary-function
+license:            Apache-2.0
+license-file:       LICENSE.md
+author:             Koz Ross
+maintainer:         koz@mlabs.city
+bug-reports:
+  https://github.com/mlabs-haskell/coarbitrary-function/issues
+
+copyright:          (C) Koz Ross 2023
+category:           Language
+tested-with:        GHC ==9.2.8 || ==9.4.4 || ==9.6.2
+build-type:         Simple
+extra-source-files:
+  CHANGELOG.md
+  README.md
+
+-- Common sections
+
+common lang
+  build-depends:    base >=4.16 && <5.0
+  ghc-options:
+    -Wall -Wcompat -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wredundant-constraints
+    -Wmissing-export-lists -Wmissing-deriving-strategies
+    -fexpose-all-unfoldings -O2
+
+  default-language: Haskell2010
+
+-- Library
+
+library
+  import:          lang
+  build-depends:
+    , indexed-traversable  ^>=0.1.2.1
+    , QuickCheck           ^>=2.14.3
+    , template-haskell     ^>=2.18.0.0
+
+  exposed-modules:
+    Index
+    Vector
+
+  hs-source-dirs:  src
+
+-- Tests
+
+test-suite properties
+  import:         lang
+  type:           exitcode-stdio-1.0
+  build-depends:
+    , coarbitrary-function
+    , indexed-traversable
+    , QuickCheck
+    , tasty                 ^>=1.4.3
+    , tasty-quickcheck      ^>=0.10.2
+
+  main-is:        Main.hs
+  ghc-options:    -threaded -rtsopts -with-rtsopts=-N
+  hs-source-dirs: test
