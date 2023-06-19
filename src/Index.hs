@@ -18,6 +18,9 @@ module Index
 
     -- * Type
     Index,
+
+    -- * Functions
+    indices,
   )
 where
 
@@ -30,6 +33,7 @@ import Test.QuickCheck
     CoArbitrary (coarbitrary),
     Function (function),
     chooseInt,
+    functionMap,
   )
 
 -- | @since 1.0.0
@@ -64,20 +68,6 @@ deriving via Int instance Eq (Index n)
 deriving via Int instance Ord (Index n)
 
 -- | @since 1.0.0
-instance (1 <= n, SizeNat n) => Bounded (Index n) where
-  {-# INLINE minBound #-}
-  minBound = Index 0
-  {-# INLINE maxBound #-}
-  maxBound = Index $ sizeNatToInt @n - 1
-
--- | @since 1.0.0
-instance (1 <= n, SizeNat n) => Enum (Index n) where
-  {-# INLINE toEnum #-}
-  toEnum = fromIntegral
-  {-# INLINE fromEnum #-}
-  fromEnum (Index x) = x
-
--- | @since 1.0.0
 instance (1 <= n, SizeNat n) => Num (Index n) where
   {-# INLINE (+) #-}
   Index x + Index y = Index $ (x + y) `rem` sizeNatToInt @n
@@ -95,7 +85,7 @@ instance (1 <= n, SizeNat n) => Num (Index n) where
   {-# INLINE fromInteger #-}
   fromInteger x = case signum x of
     (-1) -> negate . fromInteger . negate $ x
-    0 -> minBound
+    0 -> Index 0
     _ -> Index . fromIntegral $ x `rem` fromIntegral (sizeNatToInt @n)
 
 -- | @since 1.0.0
@@ -116,4 +106,8 @@ instance CoArbitrary (Index n) where
 -- | @since 1.0.0
 instance Function (Index n) where
   {-# INLINE function #-}
-  function = _
+  function = functionMap (\(Index i) -> i) Index
+
+-- | @since 1.0.0
+indices :: forall (n :: Nat). SizeNat n => [Index n]
+indices = Index <$> [0, 1 .. sizeNatToInt @n - 1]

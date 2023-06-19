@@ -151,9 +151,13 @@ newtype Vector (n :: Nat) (a :: Type)
   = Vector (Index n -> a)
 ```
 
-We can see two notable improvements: firstly, we no longer need to store length,
-as it is explicitly defined by the type; secondly, our 'index function' no
-longer takes `Int`, but instead `Index n`, which means that it is 'index-aware'.
+There are three notable improvements:
+
+1. We no longer need to store length, as the type explicitly defines it.
+2. Our 'index function' is now 'index-aware', making it impossible for us to
+   'miss indexes', for example.
+3. The type no longer needs to be closed, as the type ensures its safety.
+
 We can still write the `Functor` instance, but it's now simpler[^2]:
 
 ```haskell
@@ -191,7 +195,6 @@ they can do with it. At minimum, we want to be able to do the following:
 1. Compare `Index`es for equality and order;
 2. Work with `Index`es as if they were numbers, especially with regard to number
   literal syntax; and
-3. Enumerate `Index`es.
 
 We can do the first of these with some derivations based on the underlying
 `Int`. We'll also derive `Show` for future debugging purposes[^3].
@@ -263,7 +266,7 @@ expect `fromInteger` to be the [ring homomorphism][ring-homomorphism] from
 * `fromInteger i * fromInteger j = fromInteger (i * j)`
 * `fromInteger 1 = 1`
 
-We will focus on the first two of these. To begin with, we need to provide a way
+We will focus on the first of these. To begin with, we need to provide a way
 for QuickCheck to work with `Index`es, by way of an `Arbitrary` instance. This
 gives us two capabilities: a way of pseudorandomly generating `Index`es (a
 _generator_), and a way of taking an `Index` which is part of a 
@@ -443,7 +446,7 @@ refer to the last index as it should. Looking at our implementation of
   fromInteger x = case signum x of
       -- This line is the key
       (-1) -> negate . fromInteger . negate $ x
-      0 -> minBound
+      0 -> Index 0
       _ -> Index . fromIntegral $ x `rem` fromIntegral (sizeNatToInt @n)
 ```
 
@@ -733,7 +736,192 @@ functionMap :: forall (b :: Type) (n :: Nat) (c :: Type) .
   (Index n -> b) -> (b -> Index n) -> ((Index n -> c) -> Index n :-> c)
 ```
 
-[TODO: Complete this]
+An easy choice for `b` would be `Int`. However, at first, this seems unsafe:
+`Index n -> Int` is not a problem, but `Int -> Index n` potentially could be, as
+not every `Int` would satisfy the necessary invariants. However, `functionMap`
+ensures that it never calls its second argument on any 'new' values:
+`functionMap f g` will only call `g` on results of `f`, not arbitrary values.
+Thus, we won't run into any issues with the following:
+
+```haskell
+instance Function (Index n) where
+  function = functionMap (\(Index i) -> i) Index
+```
+
+To make use of the new capabilities the `Function` type class provides,
+QuickCheck has a type `Fun`, which can be 'unwrapped' to obtain the function so
+generated. We use `applyFun` to turn `Fun a b` into `a -> b`. However, while we
+can rewrite `arbitrary` to use `Fun`, `shrink` is still a problem:
+
+```haskell
+instance Arbitrary a => Arbitrary (Vector n a) where
+  arbitrary = Vector . applyFun <$> arbitrary
+  -- How do we turn a function back into a Fun?
+  shrink (Vector f) = Vector . applyFun <$> (shrink _ $ f)
+```
+
+We can still achieve our goals of a proper shrinking, but we have to change
+strategy.
+
+### Test case data types
+
+Given everything we have seen so far, `reindex`'s property is proving much more
+difficult to write, not least of all because it requires complex test data. To
+make this easier, we want to put this data in a form that factors this
+complexity out of the property implementation. By doing this, we don't clutter
+the property, and also have the opportunity for finer-grained control where
+needed.
+
+To test the law `reindex f . reindex g = reindex (g . f)`, we need three `Fun`s:
+`Fun (Index n1) (Index n2)`, `Fun (Index n 2) (Index n 3)`, and `Fun (Index n3)
+A` (to construct a `Vector`). Let's write a data type which bundles these:
+
+```haskell
+data ReindexPropData (n1 :: Nat) (n2 :: Nat) (n3 :: Nat)
+  = ReindexPropData
+      (Fun (Index n1) (Index n2))
+      (Fun (Index n2) (Index n3))
+      (Fun (Index n3) A)
+
+deriving stock instance Show (ReindexPropData n1 n2 n3)
+```
+
+We can define `Arbitrary` for this type by re-using `arbitrary` and `shrink`:
+
+```haskell
+instance
+  (SizeNat n1, 1 <= n1, SizeNat n2, 1 <= n2, SizeNat n3, 1 <= n3) =>
+  Arbitrary (ReindexPropData n1 n2 n3)
+  where
+  arbitrary = ReindexPropData <$> arbitrary <*> arbitrary <*> arbitrary
+  shrink (ReindexPropData f g v) =
+    ReindexPropData <$> shrink f <*> shrink g <*> shrink v
+```
+
+We can see that the `Function` instance for `Index` is being used by the
+constraints we are required to fulfil. Lastly, we can provide a helper function
+to convert a `ReindexPropData` into something more useful for us in property
+definitions:
+
+```haskell
+toReindexPropData ::
+  forall (n1 :: Nat) (n2 :: Nat) (n3 :: Nat).
+  ReindexPropData n1 n2 n3 ->
+  (Index n1 -> Index n2, Index n2 -> Index n3, Vector n3 A)
+toReindexPropData (ReindexPropData f g v) =
+  (applyFun f, applyFun g, Vector . applyFun $ v)
+```
+
+We can now rewrite our property definition to use our new data type:
+
+```haskell
+-- Better, but not there yet!
+reindexProp ::
+  forall (n1 :: Nat) (n2 :: Nat) (n3 :: Nat).
+  (SizeNat n1, 1 <= n1, SizeNat n2, 1 <= n2, SizeNat n3, 1 <= n3) =>
+  Property
+reindexProp = forAllShrinkShow arbitrary shrink show $
+  \(testData :: ReindexPropData n1 n2 n3) ->
+    let (f, g, v) = toReindexPropData testData
+     in (reindex f . reindex g $ v) === reindex (g . f) v
+```
+
+This approach has numerous advantages: we have now separated generation logic
+from property logic, we can modify the exact way we generate without having to
+modify the test (as long as `toReindexPropData` continues to work as previous),
+and if we need to, we can have `ReindexPropData` show itself differently. This
+can also be used to work around the problem of types that don't have `Arbitrary`
+instances.
+
+However, this doesn't solve all of our problems. We still have the following
+error from GHC:
+
+```
+Could not deduce (Eq (Vector n1 A)) arising from a use of ‘===’
+```
+
+This is because we never defined equality for `Vector`, as in general, functions
+can't be compared for equality. While in theory, we could do this in our case
+(as `Index` is a finitary type), it makes more sense for us to instead 'execute'
+a `Vector` into some other type for which we have `Eq`. Given the `Foldable`
+example for `Pull` from the beginning, we would want a `Foldable` instance for
+`Vector` as well. To achieve this, we need a small helper function[^10]:
+
+```haskell
+indices :: forall (n :: Nat). SizeNat n => [Index n]
+indices = Index <$> [0, 1 .. sizeNatToInt @n - 1]
+```
+
+With this available, we can define `Foldable` for `Vector`[^11]:
+
+```haskell
+instance SizeNat n => Foldable (Vector n) where
+  foldMap f (Vector g) = foldMap (f . g) $ indices @n
+```
+
+Based on this instance, we can 'execute' our `Vector` results in the test into
+lists for the purposes of comparing them:
+
+```haskell
+-- This one will work!
+reindexProp ::
+  forall (n1 :: Nat) (n2 :: Nat) (n3 :: Nat).
+  (SizeNat n1, 1 <= n1, SizeNat n2, 1 <= n2, SizeNat n3, 1 <= n3) =>
+  Property
+reindexProp = forAllShrinkShow arbitrary shrink show $
+  \(testData :: ReindexPropData n1 n2 n3) ->
+    let (f, g, v) = toReindexPropData testData
+     in toList (reindex f . reindex g $ v) === toList (reindex (g . f) v)
+```
+
+When we run the test with `cabal test`, we can see that it passes:
+
+```
+Properties
+  Index
+    fromInteger i + fromInteger j = fromInteger (i + j): OK (0.02s)
+      +++ OK, passed 10000 tests.
+  Vector
+    reindex f . reindex g = reindex (g . f):             OK (12.32s)
+      +++ OK, passed 10000 tests.
+```
+
+However, this is a slow test. Unfortunately, the price we pay for sensible
+shrinking and `show`ability is that `Fun` is slower than using `CoArbitrary`. 
+
+## Conclusion and some practices
+
+QuickCheck possesses a surprising amount of capabilities, but using it
+successfully requires knowledge which is rarely documented well. Additionally,
+we often have to use other tools to assist us, and use techniques which are not
+apparent at first glance. We covered a few of these here:
+
+* How to write generators and shrinkers.
+* The importance of shrinking.
+* Using `forAllShrinkShow` for maximum flexibility and control over property
+  definitions.
+* Using `counterexample` to help present counterexamples in the easiest way for
+  a human to make sense of.
+* Proper options for good test performance.
+* How to replay failing cases.
+* Why running more tests matters, and how to do it.
+* How to define 'test data types' and why this is useful.
+
+But most importantly, we covered `CoArbitrary` and `Function`, and how these
+enable us to generate, shrink and even show arbitrary functions. This allows us
+to write properties that seem impossible without knowing about them, but come
+with some limitations of their own, both in terms of capabilities and in terms
+of performance.
+
+QuickCheck is a widely-used tool at MLabs, and there are additional capabilities
+and techniques for its use we didn't discuss here. While using it properly can
+be a challenge, and no single clear explanation for its proper use exists, we
+wrote this to assist others in getting the most out of this capable, and
+powerful, tool. With this, your tests can become more useful, more clear, and
+more thorough, and you can benefit from this like we do.
+
+We have made all the code used in this article [available
+online](https://github.com/mlabs-haskell/devblog-1).
 
 [shrinking-and-showing]: https://dl.acm.org/doi/10.1145/2430532.2364516
 [defun-push-array]: https://www.researchgate.net/publication/266661255_Defunctionalizing_Push_arrays
@@ -742,7 +930,7 @@ functionMap :: forall (b :: Type) (n :: Nat) (c :: Type) .
 [ring-homomorphism]: https://en.wikipedia.org/wiki/Ring_homomorphism
 [repa]: https://hackage.haskell.org/package/repa
 [vector-sized]: https://hackage.haskell.org/package/vector-sized
-[^1]: Even though this is arguably not a good idea: it doesn't parallel C, nad
+[^1]: Even though this is arguably not a good idea: it doesn't parallel C, and
     creates a lot of issues with partiality.
 [^2]: You can also do something like `deriving via ((->) (Index n)) instance
     Functor (Vector n)`, since we have a `newtype` now. Probably not useful
@@ -767,3 +955,11 @@ functionMap :: forall (b :: Type) (n :: Nat) (c :: Type) .
     fusion](https://hackage.haskell.org/package/base-4.18.0.0/docs/Data-Functor-Contravariant.html#t:Contravariant).
 [^9]: This is in some ways similar to the set-theoretical representation of
     (unary) functions as a set of input-output pairs.
+[^10]: Alternatively, we could define `Bounded` and `Enum` for `Index`. However,
+    this is both less safe _and_ more restrictive: we would be limited to
+    non-empty `Index` types (even though `foldMap` still makes sense over empty
+    structures), and `Enum` is [riddled with issues of
+    partiality](https://notabug.org/sheaf/finitary#why-is-this-a-big-deal).
+[^11]: In practice, there's several methods of `Foldable` we would want to
+    overload here, particularly `length` and `null`, since they can be done
+    without having to 'execute' the `Vector`.
