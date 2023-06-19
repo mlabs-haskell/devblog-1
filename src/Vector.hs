@@ -11,7 +11,7 @@ module Vector (Vector, reindex) where
 import Data.Kind (Type)
 import GHC.TypeNats (Nat, type (<=))
 import Index (Index, SizeNat)
-import Test.QuickCheck (Arbitrary1 (liftArbitrary, liftShrink))
+import Test.QuickCheck (Arbitrary (arbitrary, shrink), Arbitrary1 (liftArbitrary, liftShrink))
 
 -- Problem with persistent data structures is that they are all pointer-based.
 -- This is bad for performance!
@@ -57,11 +57,11 @@ instance (SizeNat n, 1 <= n) => Foldable (Vector n) where
   foldMap f (Vector g) = foldMap (f . g) [minBound .. maxBound]
 
 -- | @since 1.0.0
-instance Arbitrary1 (Vector n) where
-  {-# INLINE liftArbitrary #-}
-  liftArbitrary gen = Vector <$> liftArbitrary gen
-  {-# INLINE liftShrink #-}
-  liftShrink f (Vector g) = Vector <$> liftShrink f g
+instance Arbitrary a => Arbitrary (Vector n a) where
+  {-# INLINE arbitrary #-}
+  arbitrary = Vector <$> arbitrary
+  {-# INLINE shrink #-}
+  shrink (Vector f) = Vector <$> shrink f
 
 -- | @since 1.0.0
 reindex ::

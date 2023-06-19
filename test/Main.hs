@@ -1,5 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
@@ -8,29 +9,62 @@
 
 module Main (main) where
 
-import Data.Foldable (toList)
-import Data.Kind (Type)
 import GHC.TypeNats (Nat, type (<=))
 import Index (Index, SizeNat)
 import Test.QuickCheck
   ( Arbitrary (arbitrary, shrink),
-    Fun,
-    Gen,
     Property,
-    applyFun,
+    counterexample,
     forAllShrinkShow,
-    liftArbitrary,
-    liftShrink,
     (===),
   )
 import Test.QuickCheck.Poly (A)
-import Test.Tasty (TestTree, defaultMain, testGroup)
-import Test.Tasty.QuickCheck (testProperty)
+import Test.Tasty (adjustOption, defaultMain, testGroup)
+import Test.Tasty.QuickCheck (QuickCheckTests, testProperty)
 import Vector (Vector, reindex)
 
 main :: IO ()
 main =
-  defaultMain . testGroup "Properties" $
+  defaultMain . adjustOption moreTests . testGroup "Properties" $
+    [ testGroup
+        "Index"
+        [ testProperty "fromInteger i + fromInteger j = fromInteger (i + j)" $ fiProp1 @1000
+        ],
+      testGroup
+        "Vector"
+        [ testProperty "reindex f . reindex g = reindex (g . f)" $ reindexProp @100 @200 @300
+        ]
+    ]
+  where
+    moreTests :: QuickCheckTests -> QuickCheckTests
+    moreTests = max 10_000
+
+reindexProp ::
+  forall (n1 :: Nat) (n2 :: Nat) (n3 :: Nat).
+  (SizeNat n1, 1 <= n1, SizeNat n2, 1 <= n2, SizeNat n3, 1 <= n3) =>
+  Property
+reindexProp = forAllShrinkShow arbitrary shrink show $
+  \(f :: Index n1 -> Index n2, g :: Index n2 -> Index n3, v :: Vector n3 A) ->
+    (reindex f . reindex g $ v) === reindex (g . f) v
+
+fiProp1 ::
+  forall (n :: Nat).
+  (SizeNat n, 1 <= n) =>
+  Property
+fiProp1 = forAllShrinkShow arbitrary shrink showCases $ \(i, j) ->
+  let ixI :: Index n = fromInteger i
+      ixJ :: Index n = fromInteger j
+   in counterexample ("fromInteger i = " <> show ixI)
+        . counterexample ("fromInteger j = " <> show ixJ)
+        $ ixI + ixJ === fromInteger (i + j)
+  where
+    showCases :: (Integer, Integer) -> String
+    showCases (i, j) = "i = " <> show i <> ", j = " <> show j
+
+{-
+main :: IO ()
+main =
+  defaultMain . adjustOption moreTests . testGroup "Properties" $
     [ testGroup
         "Index"
         [ testGroup
@@ -38,8 +72,9 @@ main =
             [ testProperty "x - x = minBound" $ numNegateLaw @(Index 1000),
               fromIntegralOpProperty @1000 (+) "+",
               fromIntegralOpProperty @1000 (*) "*",
-              fromIntegralOpProperty @1000 (-) "-"
-              {-
+              testProperty "abs (a * b) = abs a * abs b" $ numAbsLaw1 @1000,
+              testProperty "abs (a + b) <= abs a + abs b" $ numAbsLaw2 @1000
+              {- Draft 2:
                 testProperty "fromIntegral x + fromIntegral y = fromIntegral (x + y)" $ numFIPlusLaw @1000,
                 testProperty "fromIntegral x * fromIntegral y = fromIntegral (x * y)" $ numFITimesLaw @1000
               -}
@@ -50,8 +85,25 @@ main =
         [ testProperty "reindex f . reindex g = reindex (g . f)" $ reindexLaw @100 @200 @300
         ]
     ]
+  where
+    moreTests :: QuickCheckTests -> QuickCheckTests
+    moreTests = max 10_000
 
 -- Properties
+
+numAbsLaw2 ::
+  forall (n :: Nat).
+  (SizeNat n, 1 <= n) =>
+  Property
+numAbsLaw2 = forAllShrinkShow arbitrary shrink show $ \(ix1 :: Index n, ix2) ->
+  property $ abs (ix1 + ix2) <= abs ix1 + abs ix2
+
+numAbsLaw1 ::
+  forall (n :: Nat).
+  (SizeNat n, 1 <= n) =>
+  Property
+numAbsLaw1 = forAllShrinkShow arbitrary shrink show $ \(ix1 :: Index n, ix2) ->
+  abs ix1 * abs ix2 === abs (ix1 * ix2)
 
 reindexLaw ::
   forall (n :: Nat) (m1 :: Nat) (m2 :: Nat).
@@ -123,5 +175,7 @@ numFITimesLaw = forAllShrinkShow arbitrary shrink showArgs $ \(x, y) ->
   where
     showArgs :: (Integer, Integer) -> String
     showArgs (x, y) = "fromIntegral " <> show x <> " * fromIntegral " <> show y
+
+-}
 
 -}

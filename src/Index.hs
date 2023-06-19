@@ -30,8 +30,6 @@ import Test.QuickCheck
     CoArbitrary (coarbitrary),
     Function (function),
     chooseInt,
-    functionMap,
-    variant,
   )
 
 -- | @since 1.0.0
@@ -100,13 +98,6 @@ instance (1 <= n, SizeNat n) => Num (Index n) where
     0 -> minBound
     _ -> Index . fromIntegral $ x `rem` fromIntegral (sizeNatToInt @n)
 
-{- Draft 1:
-  fromInteger x = case signum x of
-    (-1) -> fromInteger . negate $ x
-    0 -> minBound
-    _ -> Index . fromIntegral $ x `rem` fromIntegral (sizeNatToInt @n)
--}
-
 -- | @since 1.0.0
 instance (1 <= n, SizeNat n) => Arbitrary (Index n) where
   {-# INLINE arbitrary #-}
@@ -120,9 +111,9 @@ instance (1 <= n, SizeNat n) => Arbitrary (Index n) where
 -- | @since 1.0.0
 instance CoArbitrary (Index n) where
   {-# INLINE coarbitrary #-}
-  coarbitrary (Index n) = variant n
+  coarbitrary (Index i) = coarbitrary i
 
 -- | @since 1.0.0
 instance Function (Index n) where
   {-# INLINE function #-}
-  function = functionMap (\(Index x) -> x) Index
+  function = _
