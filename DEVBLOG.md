@@ -1,30 +1,92 @@
-# Arbitrary functions in QuickCheck
+# Using QuickCheck in unexpected ways
 
 ## Introduction
 
-[TODO]
+[QuickCheck][quickcheck] is a well-known testing tool in the Haskell community.
+At MLabs, we use QuickCheck in many of our projects, and have had great success
+with it, often catching issues that would otherwise have been difficult, or
+impossible, to find. Despite its age, QuickCheck is still useful, and has a
+surprising number of capabilities.
+
+At the same time, using QuickCheck correctly, and in a way that benefits you, is
+surprisingly difficult. This is caused by a mixture of factors: a lack of
+documentation, examples that don't take into account realistic cases or
+limitations, the need to use additional tools beyond QuickCheck itself, and a
+lack of material around 'overall vision' of its use and best practices. This has
+led to a lot of frustration with QuickCheck among many of its users, even
+leading to some claims of it being useless for many projects.
+
+We believe that QuickCheck is useful, but often not in a way that's apparent. In
+this article, we will show a full, worked example of the use of QuickCheck in a
+modern way, on an example problem that is large enough to be interesting, but
+not so large as to dwarf the testing that it is meant to help demonstate. Along
+the way, we will show uses of QuickCheck that are less-known and
+less-documented, including a capability that many might not be aware of (the
+author learned many of these techniques relatively recently). By the end, we
+will have an example of proper practices with QuickCheck, as well as
+demonstrating some patterns and techniques that can be widely applied to many
+projects and test cases.
 
 ## An aside about arrays
 
-To give ourselves something to test, we will look at a small problem with a
-particular data structure, and present a small solution, whose API we can
-develop while testing.
+In order to talk about testing, we need something to test. With this in mind, we
+will look at a small problem with a particular data structure, and present a
+small solution. We can use the development of this small solution's API as a
+test target.
 
 ### Arrays: the good and the bad
 
-[TODO: Why arrays are good but functional ones are hard]
+Arrays, in the form of multiple data items adjacent in memory, is a useful and
+efficient data structure. It is compact in its memory use, and also has good
+_spatial locality_: because its elements are physically next to each other in
+memory, adjacent elements will be dragged into cache alongside the element of
+interest, which improves memory use when iterating. Furthermore, arrays have
+constant-time indexing[^0]. This makes arrays a widely-useful, and widely-used,
+data structure: in most languages, they are _the_ primitive upon which all other
+data structures are built.
 
-One option for a 'middle ground' are _pull arrays_. We can see these as an
-'array builder', similarly to how text or `ByteString` builders work: we
-represent an array as a combination of length and an 'index function':
+However, in functional languages (especially Haskell), we prefer the use of
+_functional data structures_, where updates produce a new structure, instead of
+modifying an existing one. While in theory, any structure can be made functional
+by making every update first perform a copy, this is inefficient, and functional
+data structures avoid this whenever possible. However, the memory-adjacent
+representation of arrays make them unsuitable for such a use. Generally, when it
+comes to arrays, in Haskell (and other functional languages), we have three
+options:
+
+* Perform copying on updates anyway, then try to elide some of these copies
+  using fusion techniques. This is what the [`vector`][vector] library does.
+  This is beneficial as it allows familiar APIs and a functional feel, alongside
+  the performance benefit of arrays, but copying is not guaranteed to be 
+  elided, even when it could be.
+* Use an 'array-like' structure, like a [HAMT][hamt]. This is how Clojure
+  defines 'arrays', and the `HashMap` data structure from
+  [`unordered-containers`][unordered-containers] uses a HAMT underneath as well.
+  As a HAMT is a functional data structure, we get reduced copying, but at the
+  cost of the performance benefit of arrays, as the data is no longer adjacent
+  in memory.
+* Work with mutable arrays, in either `IO` or `ST`. This is also an option
+  provided by [`vector`][vector], and tends to be the approach in other
+  functional languages (without explicitly marking the mutability effect). This
+  gives us all the performance of arrays, as well as full control over copying,
+  but this is tedious, error-prone, and prevents the use of most APIs we are
+  familiar with in Haskell: even `Functor` isn't definable over a mutable array!
+
+Ideally, we would like a 'middle ground', allowing us to get the benefits of the
+array representation when it matters (indexing, traversals) while also being
+able to use familiar Haskell APIs like `Functor`, and avoiding copying. One such
+option is the _pull array_. These are essentially a kind of 'array builder', and
+work similarly to text or `ByteString` builders. A pull array represents an
+array as a combination of length and an 'index function':
 
 ```haskell
 data Pull (a :: Type) = Pull Int (Int -> a)
 ```
 
 Our use of `Int` here parallels that of many APIs around linear collections in
-Haskell[^1]. This avoids the 'copying problem' completely. For example, consider
-the `Functor` instance for this type:
+Haskell[^1]. Essentially, we use pull arrays to describe arrays as they are
+being transformed or 'modified', avoiding the problem of copying completely. For
+example, consider the `Functor` instance for this type:
 
 ```haskell
 instance Functor Pull where
@@ -56,12 +118,15 @@ addition to `Functor`, which also gives us familiar and powerful APIs we can
 work with. This has led to their use in multiple places, including [at least one
 Haskell library][repa].
 
-However, pull arrays are not without their limitations: one of the biggest of
-these is their inherent partiality. This stems from the 'index function' not
-being aware of indices: it might be defined for some of the positions indicated
-by the length parameter, but not all. While we can prevent some of these issues
-by carefully hiding the constructor, doing so safely would require hiding some
-useful operations. For example, consider the following:
+However, pull arrays are not without their limitations. Setting aside that
+certain operations on them are not efficient (indexing, for example), the
+presentation given above is inherently partial. This stems from the 'index 
+function' having `Int` as its domain: while any valid index for an array is an
+`Int`, the converse isn't necessarily true. This means that, without due care,
+the 'index function' might be defined for some of the valid positions in the
+array we're representing, but not others. We can prevent this by making the
+`Pull` type closed, doing so would also limit our ability to provide useful
+operations. For example, consider the following: 
 
 ```haskell
 reindex :: forall (a :: Type) . (Int -> Int) -> Pull a -> Pull a
@@ -86,16 +151,23 @@ This is a powerful primitive, which we would like to make available to our
 users, but it is flawed. Not only is it not as powerful as it could be (as we
 can't change the length of the array, only its contents), but it's also
 dangerously partial: we don't know if our 'index mapping function' produces
-sensible indexes! Worse, addressing the problem of being able change the length
-of the result would require users to be even more careful to ensure they don't
-access any index that doesn't make sense. On top of all this, the signature is
-prone to being confusing: are we mapping result indices to input indices, or the
-other way around?
+sensible indexes! We could in theory address the first problem by defining
+`reindex` this way:
+
+```haskell
+reindex :: forall (a :: Type) . Int -> (Int -> Int) -> Pull a -> Pull a
+reindex len' f (Pull len g) = Pull len' (g . f)
+```
+
+However, this is even worse: now, our users have to be even more careful not to
+accidentally have the 'index mapping function' target indices that don't exist!
+On top of all this, the signature is confusing: are we mapping result indices to
+input indices, or the other way around?
 
 ### An improvement: size indexing
 
 The main reason we see the problems of the previous section is because our
-'index functions' don't operate on indexes by anything except convention. We can
+'index functions' don't operate on 'real' indices by anything except convention. We can
 resolve this problem in a similar way to how libraries like
 [`vector-sized`][vector-sized] deal with out-of-bounds access: make the length a
 statically-known part of the array, and instead of `Int`, use a tagged index
@@ -930,6 +1002,11 @@ online](https://github.com/mlabs-haskell/devblog-1).
 [ring-homomorphism]: https://en.wikipedia.org/wiki/Ring_homomorphism
 [repa]: https://hackage.haskell.org/package/repa
 [vector-sized]: https://hackage.haskell.org/package/vector-sized
+[vector]: https://hackage.haskell.org/package/vector
+[hamt]: https://en.wikipedia.org/wiki/Hash_array_mapped_trie
+[quickcheck]: https://hackage.haskell.org/package/QuickCheck
+[^0]: Insofar as [this is even possible at
+    all](https://www.ilikebigbits.com/2014_04_21_myth_of_ram_1.html).
 [^1]: Even though this is arguably not a good idea: it doesn't parallel C, and
     creates a lot of issues with partiality.
 [^2]: You can also do something like `deriving via ((->) (Index n)) instance
