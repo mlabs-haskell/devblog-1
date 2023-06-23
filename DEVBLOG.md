@@ -1,31 +1,46 @@
-# Using QuickCheck in unexpected ways
+# Using QuickCheck in Unexpected Ways
 
 ## Introduction
 
 [QuickCheck][quickcheck] is a well-known testing tool in the Haskell community.
-At MLabs, we use QuickCheck in many of our projects, and have had great success
+We use QuickCheck in many of our projects at MLabs and have had great success
 with it, often catching issues that would otherwise have been difficult, or
-impossible, to find. Despite its age, QuickCheck is still useful, and has a
-surprising number of capabilities.
+impossible, to find.
 
-At the same time, using QuickCheck correctly, and in a way that benefits you, is
-surprisingly difficult. This is caused by a mixture of factors: a lack of
-documentation, examples that don't take into account realistic cases or
-limitations, the need to use additional tools beyond QuickCheck itself, and a
-lack of material around 'overall vision' of its use and best practices. This has
-led to a lot of frustration with QuickCheck among many of its users, even
-leading to some claims of it being useless for many projects.
+QuickCheck was first published in the year 2000. It is still useful despite its
+age, and has a number of capabilities that are still surprisingly lacking in other
+libraries. At the same time, using QuickCheck productively remains challenging for
+many users.
 
-We believe that QuickCheck is useful, but often not in a way that's apparent. In
-this article, we will show a full, worked example of the use of QuickCheck in a
-modern way, on an example problem that is large enough to be interesting, but
-not so large as to dwarf the testing that it is meant to help demonstate. Along
-the way, we will show uses of QuickCheck that are less-known and
-less-documented, including a capability that many might not be aware of (the
-author learned many of these techniques relatively recently). By the end, we
-will have an example of proper practices with QuickCheck, as well as
-demonstrating some patterns and techniques that can be widely applied to many
-projects and test cases.
+These challenges arise from a mixture of factors: a lack of documentation,
+examples that don't take into account realistic cases or limitations,
+the need to use additional tools beyond QuickCheck itself, and a
+lack of material around 'overall vision' of QuickCheck's use and best practices.
+
+We believe that QuickCheck is useful, but often not in a way that is apparent.
+This series will take the reader through a full, worked example in three parts,
+focusing on a problem that is large enough to be interesting but not so large
+as to dwarf the testing that it is meant to help demonstrate.
+
+Along the way, we will show uses of QuickCheck that are less-known and
+less-documented including the practical matter of running the tests in
+a useful way, shrinking, the `CoArbitrary` typeclass, the `Function` typeclass.
+We will finish with a summary cheat sheet that the reader can bookmark
+for future reference.
+
+By the end, we will have an example of proper practices with QuickCheck,
+as well as demonstrating some patterns and techniques that can be widely
+applied to many projects and test cases.
+
+The first part of the series focuses on our motivating example. Then,
+the second part will discuss running basic tests, proper test configuration, and
+shrinking (a technique that tries to simplify randomly generated counterexamples
+within failing tests). The third part will conclude with a discussion of the
+`CoArbitrary` and `Function` typeclasses that allow testing using arbitrary
+functions.
+
+
+# Part I: A Motivating Example
 
 ## An aside about arrays
 
@@ -34,64 +49,97 @@ will look at a small problem with a particular data structure, and present a
 small solution. We can use the development of this small solution's API as a
 test target.
 
+This section will discuss QuickCheck very little. Instead, we'll try to get
+the reader into the mindset of recognizing where in the development process
+QuickCheck should be used. Readers are free to skip this section if they
+prefer; a summary will be given in section two.
+
 ### Arrays: the good and the bad
 
-Arrays, in the form of multiple data items adjacent in memory, is a useful and
-efficient data structure. It is compact in its memory use, and also has good
-_spatial locality_: because its elements are physically next to each other in
+Arrays, in the form of multiple data items adjacent in memory, are a useful and
+efficient data structure. They are compact in their memory use, and also have good
+_spatial locality_: because their elements are physically next to each other in
 memory, adjacent elements will be dragged into cache alongside the element of
-interest, which improves memory use when iterating. Furthermore, arrays have
-constant-time indexing[^0]. This makes arrays a widely-useful, and widely-used,
-data structure: in most languages, they are _the_ primitive upon which all other
-data structures are built.
+interest. This improves memory use when iterating.
 
-However, in functional languages (especially Haskell), we prefer the use of
-_functional data structures_, where updates produce a new structure, instead of
-modifying an existing one. While in theory, any structure can be made functional
-by making every update first perform a copy, this is inefficient, and functional
-data structures avoid this whenever possible. However, the memory-adjacent
-representation of arrays make them unsuitable for such a use. Generally, when it
-comes to arrays, in Haskell (and other functional languages), we have three
-options:
+Furthermore, arrays have constant-time indexing[^0]. This makes arrays
+a widely-useful, and widely-used, data structure: in most languages, they
+are _the_ primitive upon which all other data structures are built.
+
+In functional languages (especially Haskell), we prefer the use of _functional
+data structures_. When using functional data structures, updates produce a new
+structure instead of modifying an existing one.
+
+In theory, any structure can be made functional by making every update first
+perform a copy. However, this is inefficient and functional data structures avoid
+this whenever possible.
+
+The memory-adjacent representation of arrays make them unsuitable for such a
+use. When it comes to arrays in Haskell, we have three options:
 
 * Perform copying on updates anyway, then try to elide some of these copies
   using fusion techniques. This is what the [`vector`][vector] library does.
   This is beneficial as it allows familiar APIs and a functional feel, alongside
-  the performance benefit of arrays, but copying is not guaranteed to be 
-  elided, even when it could be.
+  the performance benefit of arrays. But it is imperfect: copying is not
+  guaranteed to be elided even when it could be.
 * Use an 'array-like' structure, like a [HAMT][hamt]. This is how Clojure
   defines 'arrays', and the `HashMap` data structure from
   [`unordered-containers`][unordered-containers] uses a HAMT underneath as well.
-  As a HAMT is a functional data structure, we get reduced copying, but at the
-  cost of the performance benefit of arrays, as the data is no longer adjacent
+  HAMTs are functional data structures and get reduced copying, but at the
+  cost of the performance benefit of arrays as the data is no longer adjacent
   in memory.
 * Work with mutable arrays, in either `IO` or `ST`. This is also an option
   provided by [`vector`][vector], and tends to be the approach in other
   functional languages (without explicitly marking the mutability effect). This
-  gives us all the performance of arrays, as well as full control over copying,
-  but this is tedious, error-prone, and prevents the use of most APIs we are
+  gives us all the performance of arrays, as well as full control over copying.
+  But this is tedious, error-prone, and prevents the use of most APIs we are
   familiar with in Haskell: even `Functor` isn't definable over a mutable array!
 
 Ideally, we would like a 'middle ground', allowing us to get the benefits of the
 array representation when it matters (indexing, traversals) while also being
-able to use familiar Haskell APIs like `Functor`, and avoiding copying. One such
-option is the _pull array_. These are essentially a kind of 'array builder', and
+able to use familiar Haskell APIs like `Functor` and avoiding copying. One such
+option is the _pull array_. This is essentially a kind of 'array builder', and
 work similarly to text or `ByteString` builders. A pull array represents an
 array as a combination of length and an 'index function':
 
+
 ```haskell
 data Pull (a :: Type) = Pull Int (Int -> a)
+
+
+Pull 3 f
+
+|-----------|-------------|
+|  x :: Int |  f(x) :: a  |
+|-----------|-------------|
+|   ...     |     ...     |
+|   0       |     a1      |  is morally equivalent to [a1, a2, a3]
+|   1       |     a2      |
+|   2       |     a3      |
+|-----------|-------------|
 ```
 
 Our use of `Int` here parallels that of many APIs around linear collections in
-Haskell[^1]. Essentially, we use pull arrays to describe arrays as they are
-being transformed or 'modified', avoiding the problem of copying completely. For
-example, consider the `Functor` instance for this type:
+Haskell[^1]. We use pull arrays to describe arrays as they are being transformed
+or 'modified', avoiding the problem of copying completely. For example, consider
+the `Functor` instance for this type:
 
 ```haskell
 instance Functor Pull where
   fmap :: forall (a :: Type) (b :: Type) . (a -> b) -> Pull a -> Pull b
-  fmap f (Pull len g) = Pull len (f . g)
+  fmap g (Pull len f) = Pull len (g . f)
+
+
+g <$> Pull 3 f
+
+|-----------|-------------------|
+|  x :: Int |  (g . f)(x) :: b  |
+|-----------|-------------------|
+|   ...     |     ...           |
+|   0       |    g(a1)          |  is morally equivalent to [g a1, g a2, g a3]
+|   1       |    g(a2)          |
+|   2       |    g(a3)          |
+|-----------|-------------------|
 ```
 
 Instead of having to potentially copy an entire array, we only need to compose
@@ -120,13 +168,13 @@ Haskell library][repa].
 
 However, pull arrays are not without their limitations. Setting aside that
 certain operations on them are not efficient (indexing, for example), the
-presentation given above is inherently partial. This stems from the 'index 
+presentation given above is inherently partial. This stems from the 'index
 function' having `Int` as its domain: while any valid index for an array is an
 `Int`, the converse isn't necessarily true. This means that, without due care,
 the 'index function' might be defined for some of the valid positions in the
 array we're representing, but not others. We can prevent this by making the
 `Pull` type closed, doing so would also limit our ability to provide useful
-operations. For example, consider the following: 
+operations. For example, consider the following:
 
 ```haskell
 reindex :: forall (a :: Type) . (Int -> Int) -> Pull a -> Pull a
@@ -171,7 +219,7 @@ The main reason we see the problems of the previous section is because our
 resolve this problem in a similar way to how libraries like
 [`vector-sized`][vector-sized] deal with out-of-bounds access: make the length a
 statically-known part of the array, and instead of `Int`, use a tagged index
-type. 
+type.
 
 The idea we will use is based on [a conversation regarding indexing
 safety](https://github.com/expipiplus1/vector-sized/issues/121) in the context
@@ -182,7 +230,9 @@ possible `Nat`s to only those that can be used as indexes on our platform:
 
 ```haskell
 class
-  ( KnownNat n,
+  ( -- `n` must be a Natural number
+    KnownNat n,
+    -- `n` must be less than the max, fixed-size Int for the compilation target
     n <= $(pure $ TH.LitT . TH.NumTyLit . fromIntegral $ (maxBound :: Int))
   ) =>
   SizeNat (n :: Nat)
@@ -196,17 +246,17 @@ instance
   ) =>
   SizeNat (n :: Nat)
   where
+
+  -- This is the only instance of the type class that makes sense;
+  -- it provides an `Int` equivalent to `n`, provided it is sensible
+  -- on our platform.
   sizeNatToInt = fromIntegral (natVal' @n proxy#)
 ```
 
-This combination takes some unpacking. `SizeNat` promises two things about any
-instance: firstly, that it is a genuine `Nat` (and not, for example, a stuck
-type family); secondly, that its value does not exceed the maximum value of
-`Int` for the platform the code was compiled on. This avoids the problems
-described in the aforementioned conversation, and is why we need the Template
-Haskell splice. Since only one instance of this type class makes sense, we also
-provide it immediately: essentially, `sizeNatToInt` provides an `Int` equivalent
-to `n`, provided it can be a sensible array length on our platform.
+
+> Note from Peter: If "closed" is important here, let's give at least a 
+> link to what "closed" means. If it's not, let's omit it or put it 
+> into a footnote.
 
 With this, we can define a closed type `Index`:
 
@@ -253,8 +303,47 @@ reindex f (Vector g) = Vector $ g . f
 As a bonus, the type of our improved `reindex` clearly designates which indices
 we are mapping from and to, making it easier for our users.
 
-With all of these in hand, let's see how QuickCheck can help us ensure our APIs
-are correct.
+Now is the time that a experienced practitioner turns to QuickCheck. We have
+a new data structure that has some assumed invariants that we would like to
+thoroughly test. The next post will let us see how QuickCheck can help
+ensure our APIs are correct.
+
+
+
+-----------
+# Using QuickCheck in Unexpected Ways, Part II: Basic Testing
+
+This is the second post in a three part series. [Part I](link) gave us a 
+motivating example of a type-safe _pull array_. 
+
+The type-unsafe version of a pull array represents an array as a combination 
+of length and an 'index function': 
+
+```haskell
+data Pull (a :: Type) = Pull Int (Int -> a)
+```
+
+This is 'array builder' technique leads to numerous useful and interesting
+properties, with the major drawback of the indexing function being partial.
+This partiality propagates to other parts of the pull array API and diminishes
+the usefulness of the data structure.
+
+Our type-safe version required designing a type-level `Index` to represent the length. In
+turn `Index` uses a `Nat`, `n`, to represent all indicies `0, 1, ..., n - 1` 
+at the type-level:
+
+> Q from Peter: Should we call this PullVector or PVector? I remember
+> asking Koz "Is this how vectors are defined in other libraries, or is 
+> this new?"
+
+
+```haskell
+newtype Vector (n :: Nat) (a :: Type)
+  = Vector (Index n -> a)
+```
+
+This gives us safety guarantees _if_ we properly implement our API.
+We'll now use QuickCheck to ensure that this is the case. 
 
 ## QuickCheck basics for `Index` correctness
 
@@ -280,7 +369,7 @@ deriving via Int instance Ord (Index n)
 ```
 
 For the second, we first need to decide what exactly we want indexes to do as
-numbers. A natural, and convenient, option is to treat `Index n` as natural
+numbers. A natural and convenient option is to treat `Index n` as natural
 numbers modulo `n`. This gives us almost everything we need for the `Num` type
 class[^4]: the only remaining decision is around `fromInteger`, as this will
 determine what literal syntax will do. Unfortunately, `fromInteger` overloads
@@ -341,7 +430,7 @@ expect `fromInteger` to be the [ring homomorphism][ring-homomorphism] from
 We will focus on the first of these. To begin with, we need to provide a way
 for QuickCheck to work with `Index`es, by way of an `Arbitrary` instance. This
 gives us two capabilities: a way of pseudorandomly generating `Index`es (a
-_generator_), and a way of taking an `Index` which is part of a 
+_generator_), and a way of taking an `Index` which is part of a
 counter-example and 'simplifying' it (a _shrinker_). The shrinker in particular
 is crucial for QuickCheck to be useful - without one, counter-examples can
 easily end up too complex for us to even make sense of, much less diagnose.
@@ -385,7 +474,7 @@ and [`tasty-quickcheck`][tasty-quickcheck]:
 
 ```haskell
 main :: IO ()
-main = 
+main =
   defaultMain . testGroup "Properties" $
     [ testGroup
         "Index"
@@ -457,14 +546,14 @@ understand what exactly we're being told here: on the one hand, we see a pair of
 `(-1, 1)`, but on the other hand, the failure of the test was due to `Index 2 /=
 Index 0`. It is difficult to see the relationship between these, and while in
 this case, we can probably infer what needs fixing, for more complex cases, this
-can be a serious issue. 
+can be a serious issue.
 
 Before we go any further and attempt to fix this breakage, let's make the output
 more readable. Luckily for us, QuickCheck provides us with a way of reproducing
 the exact same sequence of events that led to the failure we saw, by way of
 `--quickcheck-replay`. This is useful in other contexts as well, especially on
 collaborative projects where not everyone may know enough to fix an issue, as it
-makes reproducing a case easy. 
+makes reproducing a case easy.
 
 There are two issues with the output: firstly, while we _generate_ a pair, we
 never actually use it as such; secondly, it's not clear how our inputs translate
@@ -592,7 +681,7 @@ Properties
 ```
 
 This way, we simultaneously ensure a reasonable number of tests, but don't
-prevent more if someone wants them. 
+prevent more if someone wants them.
 
 This raises an interesting question: how many tests is 'enough'? In general,
 there's no good answer to this question. While in theory, 'as many as possible'
@@ -742,7 +831,7 @@ instance Arbitrary a => Arbitrary (Vector n a) where
 The problem here is that `shrink` is not a mandatory method of `Arbitrary`, and
 some instances leave it out: in our particular case, the instance for `Arbitrary
 (a -> b)` [does
-this](https://hackage.haskell.org/package/QuickCheck-2.14.3/docs/src/Test.QuickCheck.Arbitrary.html#line-422). 
+this](https://hackage.haskell.org/package/QuickCheck-2.14.3/docs/src/Test.QuickCheck.Arbitrary.html#line-422).
 If omitted, the method is equivalent to 'do not shrink'. This is a problem, as
 without a shrinker, QuickCheck has no way to simplify counter-examples. As we
 have seen before, this is an important capability of QuickCheck, and giving it
@@ -768,7 +857,7 @@ entire table up-front (which may not even be possible if `a` is infinite), the
 table is produced on demand: in this sense, it is _partial_, as it's not
 necessarily defined everywhere. Whenever we need an output we don't have a
 pairing for, we generate one, but if we already have a pairing in the table, we
-re-use it. 
+re-use it.
 
 This representation enables shrinking, as we can shrink the table representing
 the function. However, it also enables other capabilities, most notably `show`.
@@ -803,7 +892,7 @@ clearer, let's specialize `functionMap` for `Index n`, as well as restoring some
 implicit parentheses:
 
 ```haskell
-functionMap :: forall (b :: Type) (n :: Nat) (c :: Type) . 
+functionMap :: forall (b :: Type) (n :: Nat) (c :: Type) .
   Function b =>
   (Index n -> b) -> (b -> Index n) -> ((Index n -> c) -> Index n :-> c)
 ```
@@ -959,7 +1048,7 @@ Properties
 ```
 
 However, this is a slow test. Unfortunately, the price we pay for sensible
-shrinking and `show`ability is that `Fun` is slower than using `CoArbitrary`. 
+shrinking and `show`ability is that `Fun` is slower than using `CoArbitrary`.
 
 ## Conclusion and some practices
 
